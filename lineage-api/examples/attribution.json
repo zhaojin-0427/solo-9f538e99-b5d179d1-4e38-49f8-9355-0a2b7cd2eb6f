@@ -1,0 +1,5 @@
+{
+  "stopped_sources": [],
+  "successful_reports": ["report_gmv"],
+  "failed_reports": ["report_coupon_rate"]
+}

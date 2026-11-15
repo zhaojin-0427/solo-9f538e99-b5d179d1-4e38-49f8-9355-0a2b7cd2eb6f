@@ -70,3 +70,47 @@ class NodeOut(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[NodeOut]
     counts: dict[str, int]
+
+
+# --------------------------------------------------------------------------- #
+# Supply-outage attribution
+# --------------------------------------------------------------------------- #
+
+
+class AttributionRequest(BaseModel):
+    stopped_sources: list[str] = Field(
+        default_factory=list,
+        description="已确认停供的源字段名",
+    )
+    successful_reports: list[str] = Field(
+        default_factory=list,
+        description="实际成功产出的报表列名",
+    )
+    failed_reports: list[str] = Field(
+        default_factory=list,
+        description="实际产出失败的报表列名",
+    )
+
+
+class AttributionResponse(BaseModel):
+    stopped_sources: list[str] = Field(description="已确认停供源字段（去重排序）")
+    successful_reports: list[str]
+    failed_reports: list[str]
+    relevant_sources: list[str] = Field(
+        description="观测报表列的全部上游源字段（推断作用域）"
+    )
+    minimal_extra_stopped: int = Field(
+        description="能同时解释全部观测的最少额外停供源字段数"
+    )
+    consistent_solution_count: int = Field(
+        description="达到最少额外停供数的一致方案数量"
+    )
+    must_check_sources: list[str] = Field(
+        description="每种最少方案都新增停供的必查源字段"
+    )
+    to_check_sources: list[str] = Field(
+        description="只在部分最少方案中停供的待查源字段"
+    )
+    minimal_solutions: list[list[str]] = Field(
+        description="全部最少方案，每项为该方案新增停供的源字段"
+    )

@@ -2,7 +2,8 @@
 
 本地部署的血缘影响分析服务：批量登记**源字段 / 派生字段 / 报表列**的依赖关系，
 提交拟下线字段后，递归计算**确实失效的报表列**，并给出每个失效列各候选输入组
-缺失的具体依赖。
+缺失的具体依赖；登记日批观测后，还能反推**最少还要停供哪些源字段**才能同时
+解释成功与失败的报表产出。
 
 ## 语义规则
 
@@ -22,7 +23,7 @@
 lineage-api/
 ├── app/
 │   ├── main.py         # FastAPI 入口、异常映射、生命周期
-│   ├── service.py      # 整批事务登记、循环检测、递归失效分析
+│   ├── service.py      # 整批事务登记、循环检测、递归失效分析、停供归因
 │   ├── db.py           # SQLite 连接 / WAL / 快照与写事务
 │   ├── models.py       # Pydantic 请求与响应模型
 │   └── exceptions.py   # 领域错误（422/409/404）
@@ -30,7 +31,7 @@ lineage-api/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-└── examples/           # 可直接调用的请求样例
+└── examples/           # 可直接调用的请求样例（register/impact/attribution）
 ```
 
 ## Docker Compose 启动
@@ -133,20 +134,86 @@ curl -s -X POST http://localhost:8000/lineage/impact \
 - `unavailable_nodes` 列出全部不可用节点（含中间派生列），方便逐级排查。
 - 拟下线字段未登记时返回 `404 not_found`。
 
-### 3. 查看当前血缘 `GET /lineage/graph`
+### 3. 停供归因 `POST /lineage/attribution`
+
+值班场景：日批报表有的产出、有的失败，而已登记的停供源字段无法完全解释观测，
+需要缩小漏记停供的排查范围。提交**已确认停供的源字段**与**成功 / 失败的报表列**，
+服务在**同一血缘快照**内枚举所有停供组合，按与影响分析一致的
+“组内全可用、任一组可用”规则求能同时解释全部观测的**最少额外停供数**。
+
+- 每种最少方案之外的未确认源字段一律视为可用；
+- 返回每种最少方案都新增停供的**必查源字段**（`must_check_sources`），
+  以及只在部分方案出现的**待查源字段**（`to_check_sources`）；
+- 不存在任何一致方案时返回 `409 no_consistent_solution`（观测互相冲突）；
+- 观测报表列的相关上游源字段**超过 16 个**时返回
+  `422 inference_scope_exceeded`，拒绝无界枚举。
+
+```bash
+curl -s -X POST http://localhost:8000/lineage/attribution \
+  -H 'Content-Type: application/json' \
+  -d @examples/attribution.json
+```
+
+请求体：
+
+```json
+{
+  "stopped_sources": [],
+  "successful_reports": ["report_gmv"],
+  "failed_reports": ["report_coupon_rate"]
+}
+```
+
+响应（基于上文登记样例）：
+
+```json
+{
+  "stopped_sources": [],
+  "successful_reports": ["report_gmv"],
+  "failed_reports": ["report_coupon_rate"],
+  "relevant_sources": ["coupon_amt", "order_amt"],
+  "minimal_extra_stopped": 1,
+  "consistent_solution_count": 1,
+  "must_check_sources": ["coupon_amt"],
+  "to_check_sources": ["coupon_amt"],
+  "minimal_solutions": [["coupon_amt"]]
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+|------|------|
+| `relevant_sources` | 观测报表列的全部上游源字段，即推断作用域 |
+| `minimal_extra_stopped` | 最少需要**额外**停供的源字段数（不含已确认停供） |
+| `consistent_solution_count` | 达到该最少数量的一致方案数 |
+| `must_check_sources` | 每种最少方案都停供的源字段，优先排查 |
+| `to_check_sources` | 只在部分最少方案中停供的源字段，待排查 |
+| `minimal_solutions` | 全部最少方案，每项为该方案新增停供的源字段 |
+
+错误约定：
+
+| HTTP | error                          | 场景                                        |
+|------|--------------------------------|---------------------------------------------|
+| 422  | `validation_error`             | 重复条目、报表同时出现在成功与失败列表、无观测 |
+| 422  | `inference_scope_exceeded`     | 相关上游源字段超过 16 个（附计数与字段清单）  |
+| 404  | `not_found`                    | 字段未登记，或源字段 / 报表列类型不符         |
+| 409  | `no_consistent_solution`       | 没有任何停供方案能同时解释全部观测            |
+
+### 4. 查看当前血缘 `GET /lineage/graph`
 
 返回最近一次已提交的完整血缘（节点类型 + 全部候选组）。
 
-### 4. 健康检查 `GET /health`
+### 5. 健康检查 `GET /health`
 
 ## 并发与一致性设计
 
 1. **WAL 模式**：读写不互相阻塞。
 2. **登记串行化**：每个登记批次使用 `BEGIN IMMEDIATE` 先拿写锁，
    并发批次排队执行，配合 `busy_timeout` 避免 `database is locked`。
-3. **查询快照隔离**：每次影响分析 / 血缘查询在单连接显式事务内完成，
-   SQLite 的快照读保证请求只看到**登记前或登记后**的完整血缘，
-   不可能读到应用了一半的批次。
+3. **查询快照隔离**：每次影响分析 / 停供归因 / 血缘查询都在单连接显式事务内
+   完成，SQLite 的快照读保证请求只看到**登记前或登记后**的完整血缘，
+   不可能读到应用了一半的批次；归因推断全程基于同一个快照，不会混用前后血缘。
 4. **整批原子性**：节点与候选组分两阶段写入（先全部节点、再全部边），
    写入后做全图 DFS 环检测，发现环则抛错触发 `ROLLBACK`，批次内任何数据都不留存。
 
@@ -159,4 +226,5 @@ pytest -q
 
 覆盖：候选组 AND / OR 语义、递归失效与根因追溯、备用组存活不误报、
 循环 / 自环整批回滚、各类 422/409/404、重复登记替换、
+停供归因的最少方案枚举 / 必查与待查字段 / 冲突 / 16 源上限、
 以及在真实 uvicorn 服务上持续 4 秒的并发读写（读者只观测到完整快照）。

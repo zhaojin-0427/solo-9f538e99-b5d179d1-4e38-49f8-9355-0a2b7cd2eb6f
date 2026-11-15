@@ -28,3 +28,15 @@ class CycleDetectedError(ConflictLineageError):
 class NotFoundLineageError(LineageError):
     status_code = 404
     code = "not_found"
+
+
+class NoConsistentSolutionError(ConflictLineageError):
+    """The observed report outcomes cannot all be explained at once."""
+
+    code = "no_consistent_solution"
+
+
+class InferenceScopeExceededError(ValidationLineageError):
+    """Too many upstream source fields to enumerate the explanations."""
+
+    code = "inference_scope_exceeded"

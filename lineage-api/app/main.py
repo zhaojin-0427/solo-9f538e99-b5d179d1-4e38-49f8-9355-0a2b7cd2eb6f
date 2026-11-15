@@ -12,6 +12,8 @@ from . import service
 from .db import init_db
 from .exceptions import LineageError
 from .models import (
+    AttributionRequest,
+    AttributionResponse,
     GraphResponse,
     ImpactRequest,
     ImpactResponse,
@@ -31,7 +33,8 @@ app = FastAPI(
     title="数据血缘影响分析 API",
     description=(
         "批量登记源字段 / 派生字段 / 报表列依赖，提交拟下线字段后递归分析"
-        "确实失效的报表列及各候选组缺失依赖。"
+        "确实失效的报表列及各候选组缺失依赖；并可依据成功 / 失败报表观测"
+        "归因最少额外停供的源字段。"
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -93,6 +96,16 @@ def register(payload: RegisterRequest) -> dict:
 def impact(payload: ImpactRequest) -> dict:
     """递归分析拟下线字段导致的失效报表列。"""
     return service.analyze_impact(payload.retiring)
+
+
+@app.post(
+    "/lineage/attribution",
+    response_model=AttributionResponse,
+    tags=["lineage"],
+)
+def attribution(payload: AttributionRequest) -> dict:
+    """推断能同时解释成功 / 失败报表观测的最少额外停供源字段。"""
+    return service.attribute_outage(payload)
 
 
 @app.get("/lineage/graph", response_model=GraphResponse, tags=["lineage"])
